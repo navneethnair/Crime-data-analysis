@@ -1,0 +1,466 @@
+---
+
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+    toc_depth: '4'
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, results = "show", fig.width=8, fig.height=4)
+options(scipen = 0, digits = 3)  # controls base R output
+# check if you have ISLR package, if not, install it
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(ISLR, readxl, magrittr, dplyr, ggplot2, reshape2, GGally, leaps, glmnet) # add the packages needed
+```
+
+
+\pagebreak
+
+
+
+Case Study What can be done to reduce the crime rates? 
+
+## Part I: EDA
+
+Crime data: The data set aggregates socio-economic information, law enforcement data from 1990 and the crime data in1995 for communities in US.
+
+We first would like to visualize how crime rate (`violentcrimes.perpop`) distributes by states.  The following `r`-chunk will read in the entire crime data into the `r`-path and it also creates a subset. 
+
+```{r, echo = T}
+crime.all <- read.csv("CrimeData.csv", stringsAsFactors = F, na.strings = c("?"))
+crime <- dplyr::filter(crime.all, state %in% c("FL", "CA"))
+```
+
+We then how a heat map displaying the mean violent crime by state. 
+
+```{r, echo = T}
+
+# Remove variables about police department because there are a large number of missing values
+data1 <- crime.all[,c(2,6:103,121,122,123, 130:147)] 
+
+#Take out variables that are a function of other variables
+var_names_out <- c("num.urban","other.percap", "num.underpov",
+"num.vacant.house","num.murders","num.rapes",
+"num.robberies", "num.assaults", "num.burglaries",
+"num.larcenies", "num.autothefts", "num.arsons")
+data1 <- data1[!(names(data1) %in% var_names_out)]
+
+#Take out variables related to other crimes
+names_other_crimes <- c( "murder.perpop", "rapes.perpop",
+"robberies.perpop", "assaults.perpop",
+"burglaries.perpop", "larcenies.perpop",
+"autothefts.perpop", "arsons.perpop",
+"nonviolentcrimes.perpop")
+data2 <- data1[!(names(data1) %in% names_other_crimes)]
+
+#Take out missing values
+data3 <- na.omit(data2) 
+
+#Group variables like income and crime rate by state
+data.s <- data3 %>%
+group_by(state) %>%
+summarise(
+mean.income=mean(med.income),
+income.min=min(med.income),
+income.max=max(med.income),
+crime.rate=mean(violentcrimes.perpop, na.rm=TRUE), #ignore the missing values
+n=n())
+
+#Create a data frame with mean crime rate by state
+crime_by_state <- data.s[, c("state", "crime.rate")]
+income_by_state <- data.s[, c("state", "mean.income")]
+
+#Use standard state names instead of abbreviations
+crime_by_state$region <- tolower(state.name[match(crime_by_state$state, state.abb)])
+income_by_state$region <- tolower(state.name[match(income_by_state$state, state.abb)])
+
+#Add center coordinate for each state
+crime_by_state$center_lat <- state.center$x[match(crime_by_state$state, state.abb)]
+crime_by_state$center_long <- state.center$y[match(crime_by_state$state, state.abb)]
+
+income_by_state$center_lat <- state.center$x[match(income_by_state$state, state.abb)]
+income_by_state$center_long <- state.center$y[match(income_by_state$state, state.abb)]
+
+
+#Load US Map
+states <- map_data("state")
+
+#Combine US map with crime data
+map <- merge(states, crime_by_state, sort=FALSE, by="region", all.x=TRUE)
+map2 <- merge(states, income_by_state, sort=FALSE, by="region", all.x=TRUE)
+
+#Re-establish the point order
+map <- map[order(map$order),]
+map2 <- map2[order(map2$order),]
+
+#Plot using ggplot
+ggplot(map, aes(x=long, y=lat, group=group))+
+  geom_polygon(aes(fill=crime.rate))+
+  geom_path()+
+  geom_label(data=crime_by_state,
+  aes(x=center_lat, y=center_long, group=NA, label=state),
+  size=3, label.size = 0) +
+  scale_fill_distiller(palette = "YlGnBu", direction = 1)+
+  guides(fill = guide_legend(title = "Mean crime rate"))
+
+ggplot(map2, aes(x=long, y=lat, group=group))+
+  geom_polygon(aes(fill=mean.income))+
+  geom_path()+
+  geom_label(data=income_by_state,
+  aes(x=center_lat, y=center_long, group=NA, label=state),
+  size=3, label.size = 0) +
+  scale_fill_distiller(palette = "YlGnBu", direction = 1)+
+  guides(fill = guide_legend(title = "Mean income"))
+
+
+
+
+```
+
+
+
+Our goal is to find the factors that are related to violent crime. We will only use communities from two states `FL` and `CA` to assure the maximum possible number of variables. 
+
+1. First we prepare a set of sensible factors/variables that you may use to build a model.
+
+```{r, echo = T}
+# Remove variables about police department because there are a large number of missing values
+data1 <- crime.all[,c(2,6:103,121,122,123, 130:147)] 
+
+#Take out variables that are a function of other variables
+var_names_out <- c("num.urban","other.percap", "num.underpov",
+"num.vacant.house","num.murders","num.rapes",
+"num.robberies", "num.assaults", "num.burglaries",
+"num.larcenies", "num.autothefts", "num.arsons")
+data1 <- data1[!(names(data1) %in% var_names_out)]
+
+#Take out variables related to other crimes
+names_other_crimes <- c( "murder.perpop", "rapes.perpop",
+"robberies.perpop", "assaults.perpop",
+"burglaries.perpop", "larcenies.perpop",
+"autothefts.perpop", "arsons.perpop",
+"nonviolentcrimes.perpop")
+data2 <- data1[!(names(data1) %in% names_other_crimes)]
+
+#Take out missing values or NAs
+data3 <- na.omit(data2) 
+
+#Fileter for values from FL and CA
+crime <- dplyr::filter(data3, state %in% c("FL", "CA"))
+crime<-crime[-1]
+```
+**We did four operations to prepare a set of sensible factors / variables to use to build a model**
+
+**Step 1: Remove columns or variables about police department since there are a large number of missing variables in these columns that might skew results**
+
+**Step 2: Take out variables that are direct functions of other variables. For example num.urban and population together given percentage urban. So we need only two of these three variables**
+
+**Step 3: We are only concerned with violent crimes and want to understand predictors for violent crimes. It would be meaningless to predict violent crimes based on other crimes. So we reemove variables related to other crimes**
+
+**Step4: Lastly, we omit rows with NA values**
+
+**Finally, we filter the dataset to get data only for FL and CA states**
+
+
+We then use LASSO to choose a reasonable, small model. We fit an OLS model with the variables obtained. The final model only includes variables with $p$-values $< 0.05$. 
+
+
+```{r, echo = T, results= T}
+Y <- crime[, 98] # extract Y
+X.fl <- model.matrix(violentcrimes.perpop~., data=crime)[, -1]
+# get X variables as a matrix. it will also code the categorical
+# variables correctly!. The first col of model.matrix is vector 1
+# dim(X.fl)
+
+
+set.seed(10) # to control the ramdomness in K folds
+fit.fl.cv <- cv.glmnet(X.fl, Y, alpha=1, nfolds=10 )
+#plot(fit.fl.cv$lambda) # There are 100 lambda values used
+
+plot(fit.fl.cv)
+
+coef.min <- coef(fit.fl.cv, s="lambda.min") #s=c("lambda.1se","lambda.min") or lambda value
+coef.min <- coef.min[which(coef.min !=0),] # get the non=zero coefficients
+coef.min # the set of predictors chosen by Lasso
+
+var.min <- rownames(as.matrix(coef.min))
+```
+**The model reported by LASSO is of form: 
+`r paste("violentcrimes.perpop", "~", paste(var.min[-1], collapse = " + "))`. 
+
+The model after running OLS is shown below
+
+```{r, echo = T, results= T}
+var.min <- rownames(as.matrix(coef.min)) # output the names
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var.min[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output <- coef(fit.min.lm) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+
+comp <- data.frame(coef.min, lm.output)
+names(comp) <- c("LASSO estimates", "LM estimates")
+print(comp) # print coparison between LASSO and lm estimates
+```
+
+
+
+**The LASSO coefficients as smaller in absolute value compared to the OLS estimates. The coefficients have the same signs. This is because of the way LASSO regularization works where it enforces an L1 penalty that causes the coefficients to be smaller in absolute value.**
+
+
+Final model, after excluding high $p$-value variables: 
+
+**Method 1: Start with the relaxed lasso model and use bic to narrow it down. This gives us a set of 7 predictors that are all significant at 0.05 level**
+```{r, echo = T, results=T}
+
+fit.exh <- regsubsets(lm.input, crime , nvmax=12, method="exhaustive")
+f.e <- summary(fit.exh)
+
+plot(f.e$cp, xlab="Number of predictors",
+ylab="BIC", col="red", type="p", pch=16)
+
+num_predictors <-which.min(f.e$bic)
+
+lm.input.exh <- as.formula(paste("violentcrimes.perpop","~",paste(colnames(f.e$which)[f.e$which[num_predictors,]][-1],collapse = "+")))
+
+lm.output.exh <- lm(lm.input.exh, crime)
+summary(lm.output.exh)
+
+```
+
+
+**Method 2: Remove variables one by one starting with the variable with the highest p value. Run anova tests to ensure that the variable you are removing is insignificant. Repeat the process till all remaining variables are significant at 0.05 level. This gave a set of 8 predictors **
+```{r, echo = T, results = T}
+#crime %>%
+#  select_if(is.numeric) %>%
+#  select(var.min[-1]) %>%
+  # pairs() # base pair-wise scatter plots
+#  cor()
+
+#Anova(fit.min.lm)
+
+# Remove num.kids.nvmarried
+var2 <- var.min[-8]
+
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var2[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm2 <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output2 <- coef(fit.min.lm2) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#anova(fit.min.lm,fit.min.lm2)
+#summary(fit.min.lm2)
+
+
+
+
+# Remove med.yr.house.built
+var3 <- var2[-12]
+
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var3[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm3 <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output3 <- coef(fit.min.lm3) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#anova(fit.min.lm2,fit.min.lm3)
+#summary(fit.min.lm3)
+
+
+# Remove pct.house.vacant
+var4 <- var3[-11]
+
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var4[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm4 <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output4 <- coef(fit.min.lm4) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#anova(fit.min.lm3,fit.min.lm4)
+#summary(fit.min.lm4)
+
+
+# Remove pct.house.occup
+var5 <- var4[-10]
+
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var5[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm5 <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output5 <- coef(fit.min.lm5) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#anova(fit.min.lm4,fit.min.lm5)
+#summary(fit.min.lm5)
+
+
+# Remove pct.farmself.inc
+var6 <- var5[-3]
+
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var6[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm6 <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output6 <- coef(fit.min.lm6) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#anova(fit.min.lm5,fit.min.lm6)
+#summary(fit.min.lm6)
+
+
+# Remove pct.house.nophone
+var7 <- var6[-9]
+
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var7[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm7 <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output7 <- coef(fit.min.lm7) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#anova(fit.min.lm6,fit.min.lm7)
+
+summary(fit.min.lm7)
+
+
+```
+
+**We select the model in method 1 as our final model**
+
+Model diagnosis on the final model (method 1)
+
+```{r, echo = T}
+
+par(mfrow=c(1,2), mar=c(5,2,4,2), mgp=c(3,0.5,0))
+plot(lm.output.exh, 1, pch=16) # residual plot
+abline(h=0, col="blue", lwd=2)
+plot(lm.output.exh, 2) # qqplot
+
+```
+  
+  **Linearity: The residuals follow a symmetric pattern around h=0 in the residuals vs fitted plot. Hence lineaity assumptions hold**
+  **Heteroscedasticity: The residuals fan out in the residuals vs fitted plot, indicating some heteroscedasticity**
+  **Normality: The model is only approximately normal since the residuals diverge at the extremities in the Q-Q plot**
+
+
+
+Elastic Net
+
+Now, instead of LASSO, we want to consider how changing the value of $\alpha$ (i.e. mixing between LASSO and Ridge) will affect the model. Cross-validate between $\alpha$ and $\lambda$, instead of just $\lambda$. 
+
+
+
+**We run the model for 11 different values of alpha starting at 0.0 and going to 1.0 in increments of 0.1. We choose the alpha that minimises cross validation error. We then find the minimum lambda corresponding to the. The R code is shown below. It calculates aplha, lambda, prediction error and the final elastic model.**
+```{r, echo = T}
+
+
+X.fl <- model.matrix(violentcrimes.perpop~., data=crime)[, -1]
+# get X variables as a matrix. it will also code the categorical variables correctly!.
+#The first col of model.matrix is vector 1
+
+Y <- crime$violentcrimes.perpop
+
+set.seed(100)
+mse <- data.frame(alpha = rep(0,11), mse = rep(0,11))
+lambda <- data.frame(alpha = rep(0,11), lambda_min = rep(0,11))
+
+#running the model 11 times for different alphas
+for (i in 0:10) {
+  fit.fl.cv <- cv.glmnet(X.fl, Y, alpha= i*0.1, nfolds=10)
+  mse.min <- min(fit.fl.cv$cvm)
+  mse$alpha[i+1] <- i*0.1
+  mse$mse[i+1] <- mse.min
+  lambda$alpha[i+1] <- i*0.1
+  lambda$lambda_min[i+1] <- fit.fl.cv$lambda.min
+}
+
+mse
+final.alpha <- mse$alpha[mse$mse==min(mse$mse)]
+final.alpha # chosen alpha value
+min(mse$mse) # cross validation error
+final.lambda <- lambda[which(lambda$alpha==final.alpha),2] # chosen lambda
+
+
+
+fit.fl.final <- glmnet(X.fl, Y, alpha=final.alpha, lambda=final.lambda) # the final elastic net fit
+beta.final <- coef(fit.fl.final)
+beta.final <- beta.final[which(beta.final !=0),]
+beta.final # the elastic net model
+beta.final <- rownames(as.matrix(beta.final))
+
+```
+
+** The value of alpha is `r final.alpha` **
+
+** The value of lambda is `r final.lambda` **
+
+** The value of prediction error is `r min(mse$mse)` **
+
+**The model reported by elastic net is of form: 
+`r paste("violentcrimes.perpop", "~", paste(beta.final[-1], collapse = " + "))`. 
+
+
+
+Using the elastic net variables in an OLS model.
+
+```{r, echo = T}
+coef.min <- coef(fit.fl.final, s="lambda.min") #s=c("lambda.1se","lambda.min") or lambda value
+coef.min <- coef.min[which(coef.min !=0),] # get the non=zero coefficients
+var.min <- rownames(as.matrix(coef.min)) # output the names
+lm.input <- as.formula(paste("violentcrimes.perpop", "~", paste(var.min[-1], collapse = "+")))
+# prepare for lm fomulae
+
+fit.min.lm <- lm(lm.input, data=crime) # debiased or relaxed LASSO
+lm.output <- coef(fit.min.lm) # output lm estimates. compare this with the LASSO output, any difference? in what way?
+#summary(fit.min.lm)
+training_error <- sum(fit.min.lm$residuals^2)/length(fit.min.lm$residuals)
+
+
+# Calculating the prediction error
+X.fl.ols <- data.frame(X.fl) %>% select(var.min[-1]) 
+fit.ols <- cv.glmnet(as.matrix(X.fl.ols), Y, alpha=1, lambda=c(0,1))
+ols.cv <- fit.ols$cvm[fit.ols$lambda==0]
+
+```
+
+**The prediction error is `r ols.cv`
+
+ 
+```{r, echo = T, results=T}
+
+comp <- data.frame(coef.min, lm.output)
+names(comp) <- c("Elastic net estimates", "LM estimates")
+comp
+
+``` 
+ 
+ **The elastic net coefficients are smaller in absolute value compared to the OLS estimates. The coefficients have the same signs. This is because of the way  regularization works where it enforces an L1 and L2 penalty that causes the coefficients to be smaller in absolute value.**
+ 
+## Summary
+
+
+**Summarizing the crime situation in US**
+
+* The Southeastern states like FL, SC, LA have the highest violent crime rates in the US
+* The northern states like ND, SD, WY have the lowest crime rates
+
+**Three suggestions to local officials / policy makers**
+
+* 1. The higher the percentage of working moms, the lower the crime rate. The government should focus on educating anf employing women, especially mothers since this reduces crime rates by ensuring a stable financial future for families.
+
+* 2. Family structure and stability is very important. The higher the ratio of kids to parents and lower the divorce rates, the lower the violent crime rates. Thus the goverment should make it easier to have kids. this can be done by subsidising education and costs of raising children. 
+
+* 3. Housing is an important invesdtment area. The higher the number of people living in shelters, the higher is the violent crime rate. Thus goverment should investment in housing, especially for the homeless
+
+**How to improve the study**
+
+* 1. More complete data: Reduce the number of NAs in the various fields
+* 2. Uniform data: Ensure that all states have similar data points or samples to avoid bisases
+* 3. Additional data: Could be useful to look into other factors or predictors around education systems, vocational training, jurisdiction systems etc.
+
+
